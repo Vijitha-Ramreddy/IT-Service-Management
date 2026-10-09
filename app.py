@@ -155,6 +155,35 @@ def now_iso() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def normalize_date_filter(value: str | None, *, end_of_day: bool = False) -> str | None:
+    if value in (None, ""):
+        return None
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(stripped, "%Y-%m-%d")
+        except ValueError:
+            return stripped
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    if end_of_day:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999000)
+    else:
+        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def parse_datetime(value: str | None) -> datetime | None:
     if value is None:
         return None
@@ -600,13 +629,14 @@ async def create_request(payload: RequestCreate) -> dict[str, Any]:
         attachments_json = __import__("json").dumps(payload.attachments) if payload.attachments else None
         number = request_number_for(conn)
 
+        created_at = now_iso()
         cur = conn.execute(
             """
             INSERT INTO requests (
                 request_number, requester_id, assigned_agent_id, category_id, priority_id,
                 status_id, sla_policy_id, subject, description, attachments, due_at,
                 assigned_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 number,
@@ -621,6 +651,8 @@ async def create_request(payload: RequestCreate) -> dict[str, Any]:
                 attachments_json,
                 requested_due_at,
                 None,
+                created_at,
+                created_at,
             ),
         )
         request_id = cur.lastrowid
@@ -628,8 +660,8 @@ async def create_request(payload: RequestCreate) -> dict[str, Any]:
         if payload.assigned_agent_id is not None:
             validate_assignee(conn, payload.assigned_agent_id)
             conn.execute(
-                "UPDATE requests SET assigned_at = ?, status_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (now_iso(), get_status_id(conn, "Assigned"), request_id),
+                "UPDATE requests SET assigned_at = ?, status_id = ?, updated_at = ? WHERE id = ?",
+                (now_iso(), get_status_id(conn, "Assigned"), now_iso(), request_id),
             )
             conn.execute(
                 "INSERT INTO assignment_history (request_id, from_agent_id, to_agent_id, changed_by_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -656,6 +688,9 @@ async def list_requests(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
+    normalized_start_date = normalize_date_filter(start_date)
+    normalized_end_date = normalize_date_filter(end_date, end_of_day=True)
+
     offset = (page - 1) * limit
     query = "SELECT r.*, s.name AS status_name FROM requests r LEFT JOIN statuses s ON s.id = r.status_id WHERE 1=1"
     params: list[Any] = []
@@ -669,12 +704,12 @@ async def list_requests(
     if requester_id is not None:
         query += " AND r.requester_id = ?"
         params.append(requester_id)
-    if start_date:
+    if normalized_start_date:
         query += " AND r.created_at >= ?"
-        params.append(start_date)
-    if end_date:
+        params.append(normalized_start_date)
+    if normalized_end_date:
         query += " AND r.created_at <= ?"
-        params.append(end_date)
+        params.append(normalized_end_date)
 
     with get_db_connection() as conn:
         rows = conn.execute(query + " ORDER BY r.created_at DESC LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
@@ -697,12 +732,12 @@ async def list_requests(
         if requester_id is not None:
             total_query += " AND r.requester_id = ?"
             total_params.append(requester_id)
-        if start_date:
+        if normalized_start_date:
             total_query += " AND r.created_at >= ?"
-            total_params.append(start_date)
-        if end_date:
+            total_params.append(normalized_start_date)
+        if normalized_end_date:
             total_query += " AND r.created_at <= ?"
-            total_params.append(end_date)
+            total_params.append(normalized_end_date)
         total = conn.execute(total_query, total_params).fetchone()["total"]
 
     return {
@@ -861,7 +896,8 @@ async def update_request(id: int, payload: RequestUpdate) -> dict[str, Any]:
         if not updates:
             raise HTTPException(status_code=400, detail="No valid fields were provided for update")
 
-        updates.append("updated_at = CURRENT_TIMESTAMP")
+        updates.append("updated_at = ?")
+        values.append(now_iso())
         values.append(id)
         cursor = conn.execute(f"UPDATE requests SET {', '.join(updates)} WHERE id = ?", values)
         if cursor.rowcount == 0:
@@ -886,8 +922,8 @@ async def assign_request(id: int, payload: AssignmentRequest) -> dict[str, Any]:
 
         with conn:
             cursor = conn.execute(
-                "UPDATE requests SET assigned_agent_id = ?, assigned_at = ?, status_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND closed_at IS NULL",
-                (payload.assignee_id, now_iso(), get_status_id(conn, next_status_name), id),
+                "UPDATE requests SET assigned_agent_id = ?, assigned_at = ?, status_id = ?, updated_at = ? WHERE id = ? AND closed_at IS NULL",
+                (payload.assignee_id, now_iso(), get_status_id(conn, next_status_name), now_iso(), id),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="Request was updated concurrently; please retry")
@@ -949,12 +985,14 @@ async def summary_report(request: Request, start_date: str | None = None, end_da
     with get_db_connection() as conn:
         where = []
         params: list[Any] = []
-        if start_date:
+        normalized_start_date = normalize_date_filter(start_date)
+        normalized_end_date = normalize_date_filter(end_date, end_of_day=True)
+        if normalized_start_date:
             where.append("created_at >= ?")
-            params.append(start_date)
-        if end_date:
+            params.append(normalized_start_date)
+        if normalized_end_date:
             where.append("created_at <= ?")
-            params.append(end_date)
+            params.append(normalized_end_date)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
         total = conn.execute(f"SELECT COUNT(*) AS total FROM requests{where_sql}", params).fetchone()["total"]
@@ -1042,12 +1080,14 @@ async def report_by_assignee(request: Request, start_date: str | None = None, en
 def build_report_where(start_date: str | None, end_date: str | None):
     clauses = []
     params: list[Any] = []
-    if start_date:
+    normalized_start_date = normalize_date_filter(start_date)
+    normalized_end_date = normalize_date_filter(end_date, end_of_day=True)
+    if normalized_start_date:
         clauses.append("r.created_at >= ?")
-        params.append(start_date)
-    if end_date:
+        params.append(normalized_start_date)
+    if normalized_end_date:
         clauses.append("r.created_at <= ?")
-        params.append(end_date)
+        params.append(normalized_end_date)
     where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
     return where_sql, params
 
@@ -1073,8 +1113,8 @@ async def update_request_status(id: int, payload: StatusUpdate) -> dict[str, Any
         actor_id = request_row["requester_id"]
         with conn:
             cursor = conn.execute(
-                "UPDATE requests SET status_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND closed_at IS NULL",
-                (next_status_id, id),
+                "UPDATE requests SET status_id = ?, updated_at = ? WHERE id = ? AND closed_at IS NULL",
+                (next_status_id, now_iso(), id),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="Request was updated concurrently; please retry")
@@ -1115,8 +1155,8 @@ async def resolve_request(id: int, payload: ResolveRequest) -> dict[str, Any]:
         resolved_by = payload.resolved_by or request_row["requester_id"]
         with conn:
             cursor = conn.execute(
-                "UPDATE requests SET status_id = ?, resolved_at = ?, resolved_by = ?, resolution_details = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND resolved_at IS NULL",
-                (get_status_id(conn, "Resolved"), now_iso(), resolved_by, payload.resolution_details.strip(), id),
+                "UPDATE requests SET status_id = ?, resolved_at = ?, resolved_by = ?, resolution_details = ?, updated_at = ? WHERE id = ? AND resolved_at IS NULL",
+                (get_status_id(conn, "Resolved"), now_iso(), resolved_by, payload.resolution_details.strip(), now_iso(), id),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="Request status changed concurrently; please retry")
@@ -1146,8 +1186,8 @@ async def close_request(id: int, payload: CloseRequest) -> dict[str, Any]:
         closed_by = payload.closed_by or request_row["requester_id"]
         with conn:
             cursor = conn.execute(
-                "UPDATE requests SET status_id = ?, closed_at = ?, closed_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND closed_at IS NULL",
-                (get_status_id(conn, "Closed"), now_iso(), closed_by, id),
+                "UPDATE requests SET status_id = ?, closed_at = ?, closed_by = ?, updated_at = ? WHERE id = ? AND closed_at IS NULL",
+                (get_status_id(conn, "Closed"), now_iso(), closed_by, now_iso(), id),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="Request was updated concurrently; please retry")

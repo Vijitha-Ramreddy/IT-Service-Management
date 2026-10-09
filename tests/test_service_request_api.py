@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -135,6 +136,17 @@ def test_reports_unassigned_and_agents(client):
     assert agents.status_code == 200, agents.text
     assert unassigned.status_code == 200, unassigned.text
     assert unassigned.json()["total"] >= 1
+
+
+def test_requests_can_be_filtered_by_same_day_date_range(client):
+    created = create_request(client)
+    request_date = datetime.fromisoformat(created["created_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    date_only = request_date.strftime("%Y-%m-%d")
+
+    response = client.get("/api/v1/requests", params={"start_date": date_only, "end_date": date_only})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] >= 1
 
 
 def test_users_metadata_endpoint_works(client):

@@ -36,10 +36,13 @@ except ApiClientError as exc:
     st.stop()
 
 if not rows:
+    st.metric("Assigned requests", 0)
     st.info("No requests are currently assigned to the selected agent.")
     st.stop()
 
+st.metric("Assigned requests", len(rows))
 df = pd.DataFrame(rows)
+st.caption(f"{len(rows)} requests are currently assigned to this agent.")
 st.dataframe(df[["request_number", "subject", "status", "priority_id", "sla_state", "created_at"]], use_container_width=True, hide_index=True)
 
 selected_request_id = st.selectbox("Choose a request to act on", options=[row["id"] for row in rows], format_func=lambda value: f"REQ-{value}")
