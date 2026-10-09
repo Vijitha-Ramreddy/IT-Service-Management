@@ -1,4 +1,28 @@
+# Python virtual environments
+.venv/
 venv/
+env/
+ENV/
+
+# Python cache and bytecode
 __pycache__/
-*.db
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and env files
 .env
+.env.*
+!.env.example
+
+# Database and generated artifacts
+*.db
+*.sqlite3
+*.sqlite
+*.log
+
+# OS/editor leftovers
+.DS_Store

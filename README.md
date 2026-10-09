@@ -1,4 +1,4 @@
-# IT Service Request Management System
+# IT-Service-Management
 
 This project implements a FastAPI-backed service request management API using the existing SQLite database schema in the repository. The application is designed to support a ticket lifecycle from request creation through assignment, workflow updates, resolution, closure, comments, history tracking, SLA reporting, and management summaries.
 
