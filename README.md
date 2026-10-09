@@ -148,3 +148,4 @@ The automated suite covers request lifecycle, status validation, invalid transit
 - The project intentionally reuses the existing schema and database rather than creating duplicate tables.
 - The application uses the SQLite database configured through `DATABASE_URL` or the default file-based database under the project directory.
 - Manager-only reporting is guarded by request headers such as `X-User-Role` when present; the default test setup keeps the API open for local internal use without a token layer.
+# IT-Service-Management
